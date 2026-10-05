@@ -27,7 +27,7 @@ actor ParakeetService {
       configuration.computeUnits = .cpuAndNeuralEngine
       let models = try await AsrModels.loadFromCache(
         configuration: configuration,
-        version: .v3,
+        version: .ultra,
         encoderComputeUnits: .cpuAndNeuralEngine
       ) { update in
         progress(

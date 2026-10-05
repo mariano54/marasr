@@ -105,7 +105,7 @@ struct SettingsView: View {
           )
         )
 
-        LabeledContent("Parakeet v3") {
+        LabeledContent("Parakeet Ultra") {
           HStack(spacing: 6) {
             Circle()
               .fill(appState.modelReady ? .green : .orange)

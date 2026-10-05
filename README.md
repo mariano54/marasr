@@ -15,8 +15,9 @@ cannot fetch models even if a future dependency tries.
 - Live overlay while you speak, then a local history in the dashboard
 - Optional glossary for names and terms you want spelled a certain way
 
-The recognizer is NVIDIA Parakeet TDT 0.6B v3 through FluidAudio / Core ML.
-Voice activity uses Silero. Both run locally on the Neural Engine.
+The recognizer is Parakeet Ultra, Moondream's post-trained NVIDIA Parakeet TDT
+0.6B v3 (CC-BY-4.0), through FluidAudio / Core ML. Voice activity uses Silero.
+Both run locally on the Neural Engine.
 
 ## Privacy
 
@@ -30,9 +31,15 @@ The sandbox entitlements are only:
 
 There is no `com.apple.security.network.client` or server entitlement.
 
-Models are loaded from the local FluidAudio cache:
+Models are loaded from the local FluidAudio cache inside the app's sandbox
+container:
 
-`~/Library/Application Support/FluidAudio/`
+`~/Library/Containers/com.mariano.marasr/Data/Library/Application Support/FluidAudio/Models/`
+
+It needs two folders there:
+
+- `parakeet-ultra-coreml` (from `FluidInference/parakeet-ultra-coreml`)
+- `silero-vad-coreml` (from `FluidInference/silero-vad-coreml`)
 
 If those files are missing, the app fails locally. It will not download them.
 
@@ -41,7 +48,7 @@ If those files are missing, the app fails locally. It will not download them.
 - Apple Silicon Mac
 - macOS 15 or newer
 - Xcode 26 or newer
-- Local Parakeet v3 and Silero Core ML caches already on disk
+- Local Parakeet Ultra and Silero Core ML caches already on disk
 
 ## Run
 

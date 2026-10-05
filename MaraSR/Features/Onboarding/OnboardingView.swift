@@ -116,10 +116,10 @@ struct OnboardingView: View {
         .font(.system(size: 44))
         .foregroundStyle(Color.accentColor)
 
-      Text("Prepare Parakeet v3")
+      Text("Prepare Parakeet Ultra")
         .font(.system(size: 30, weight: .bold, design: .rounded))
       Text(
-        "MaraSR loads Parakeet v3 and Silero from the local Core ML cache. It has no network entitlement and will not download models."
+        "MaraSR loads Parakeet Ultra and Silero from the local Core ML cache. It has no network entitlement and will not download models."
       )
       .foregroundStyle(.white.opacity(0.58))
       .multilineTextAlignment(.center)

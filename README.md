@@ -36,10 +36,11 @@ container:
 
 `~/Library/Containers/com.mariano.marasr/Data/Library/Application Support/FluidAudio/Models/`
 
-It needs two folders there:
+It needs two folders there. FluidAudio drops the `-coreml` suffix from the
+Hugging Face repo name:
 
-- `parakeet-ultra-coreml` (from `FluidInference/parakeet-ultra-coreml`)
-- `silero-vad-coreml` (from `FluidInference/silero-vad-coreml`)
+- `parakeet-ultra` (from `FluidInference/parakeet-ultra-coreml`)
+- `silero-vad` (from `FluidInference/silero-vad-coreml`)
 
 If those files are missing, the app fails locally. It will not download them.
 

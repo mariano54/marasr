@@ -44,6 +44,7 @@ final class GlobalHotkeyManager {
         userInfo: Unmanaged.passUnretained(self).toOpaque()
       )
     else {
+      Log.hotkeys.error("CGEvent tap could not be created")
       throw GlobalHotkeyError.eventTapUnavailable
     }
 
@@ -60,6 +61,7 @@ final class GlobalHotkeyManager {
     eventTap = tap
     runLoopSource = source
     CGEvent.tapEnable(tap: tap, enable: true)
+    Log.hotkeys.notice("Hotkey listener started")
   }
 
   func stop() {
@@ -109,6 +111,9 @@ final class GlobalHotkeyManager {
 
   private func handle(type: CGEventType, event: CGEvent) {
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+      Log.hotkeys.notice(
+        "Event tap disabled (\(type == .tapDisabledByTimeout ? "timeout" : "user input", privacy: .public)), hold was \(self.holdIsDown ? "down" : "up", privacy: .public); re-enabling"
+      )
       if holdIsDown {
         holdIsDown = false
         onHoldChanged?(false)

@@ -6,6 +6,7 @@ struct MaraSRApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
   init() {
+    Log.logLaunch()
     OfflineAudio.activate()
     do {
       let container = try ModelContainer(
@@ -18,6 +19,9 @@ struct MaraSRApp: App {
       )
       appDelegate.appState = state
     } catch {
+      Log.app.fault(
+        "Unable to create MaraSR storage: \(String(describing: error), privacy: .public)"
+      )
       fatalError("Unable to create MaraSR storage: \(error)")
     }
   }

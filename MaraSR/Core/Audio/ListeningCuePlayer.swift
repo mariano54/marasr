@@ -5,26 +5,20 @@ final class ListeningCuePlayer {
   private static let sampleRate = 48_000.0
   private static let duration = 0.18
 
-  private let engine = AVAudioEngine()
-  private let player = AVAudioPlayerNode()
+  private var engine = AVAudioEngine()
+  private var player = AVAudioPlayerNode()
+  private let format = AVAudioFormat(
+    standardFormatWithSampleRate: sampleRate,
+    channels: 1
+  )
   private let buffer: AVAudioPCMBuffer?
   private var stopTask: Task<Void, Never>?
+  private var configurationObserver: NSObjectProtocol?
+  private var engineIsStale = false
 
   init() {
-    let format = AVAudioFormat(
-      standardFormatWithSampleRate: Self.sampleRate,
-      channels: 1
-    )
     buffer = format.flatMap(Self.makeBuffer)
-    engine.attach(player)
-    if let format {
-      engine.connect(
-        player,
-        to: engine.mainMixerNode,
-        format: format
-      )
-    }
-    engine.prepare()
+    configureEngine()
   }
 
   func play() {
@@ -32,16 +26,24 @@ final class ListeningCuePlayer {
       return
     }
     stopTask?.cancel()
-    player.stop()
-    if !engine.isRunning {
+    if engineIsStale {
+      rebuildEngine(reason: "configuration changed since last use")
+    }
+    do {
+      try schedule(buffer)
+    } catch {
+      rebuildEngine(reason: "cue playback failed")
       do {
-        try engine.start()
+        try schedule(buffer)
       } catch {
+        // The cue is cosmetic; dictation goes ahead without it.
+        Log.audio.error(
+          "Listening cue skipped: \(String(describing: error), privacy: .public)"
+        )
+        engineIsStale = true
         return
       }
     }
-    player.scheduleBuffer(buffer, at: nil, options: .interrupts)
-    player.play()
     stopTask = Task { [weak self] in
       try? await Task.sleep(for: .milliseconds(240))
       guard !Task.isCancelled else {
@@ -50,6 +52,66 @@ final class ListeningCuePlayer {
       self?.player.stop()
       self?.engine.stop()
     }
+  }
+
+  private func schedule(_ buffer: AVAudioPCMBuffer) throws {
+    let engine = engine
+    let player = player
+    try ObjCException.catching("listening cue", log: Log.audio) {
+      player.stop()
+      if !engine.isRunning {
+        try engine.start()
+      }
+      player.scheduleBuffer(buffer, at: nil, options: .interrupts)
+      player.play()
+    }
+  }
+
+  private func configureEngine() {
+    let engine = engine
+    let player = player
+    let format = format
+    do {
+      try ObjCException.catching("listening cue setup", log: Log.audio) {
+        engine.attach(player)
+        if let format {
+          engine.connect(
+            player,
+            to: engine.mainMixerNode,
+            format: format
+          )
+        }
+        engine.prepare()
+      }
+    } catch {
+      engineIsStale = true
+    }
+    configurationObserver = NotificationCenter.default.addObserver(
+      forName: .AVAudioEngineConfigurationChange,
+      object: engine,
+      queue: .main
+    ) { [weak self] _ in
+      Task { @MainActor in
+        Log.audio.notice("Output configuration changed; cue engine will be rebuilt")
+        self?.engineIsStale = true
+      }
+    }
+  }
+
+  private func rebuildEngine(reason: String) {
+    Log.audio.notice(
+      "Rebuilding cue engine: \(reason, privacy: .public)"
+    )
+    stopTask?.cancel()
+    player.stop()
+    engine.stop()
+    if let configurationObserver {
+      NotificationCenter.default.removeObserver(configurationObserver)
+    }
+    engine = AVAudioEngine()
+    player = AVAudioPlayerNode()
+    engineIsStale = false
+    configureEngine()
   }
 
   private static func makeBuffer(

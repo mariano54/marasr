@@ -11,8 +11,8 @@ struct GlossaryEntry: Codable, Equatable, Identifiable, Sendable {
     self.aliases = aliases
   }
 
-  static let issen = GlossaryEntry(
-    canonical: "ISSEN",
-    aliases: ["issen", "Issen", "Essen", "Isen"]
+  static let acme = GlossaryEntry(
+    canonical: "ACME",
+    aliases: ["acme"]
   )
 }

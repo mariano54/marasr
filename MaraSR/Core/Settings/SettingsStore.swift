@@ -53,7 +53,7 @@ final class SettingsStore: ObservableObject {
         [GlossaryEntry].self,
         key: Keys.glossary,
         defaults: defaults
-      ) ?? [.issen]
+      ) ?? []
     onboardingComplete = defaults.bool(forKey: Keys.onboardingComplete)
     launchAtLogin = defaults.bool(forKey: Keys.launchAtLogin)
   }

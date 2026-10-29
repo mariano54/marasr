@@ -24,14 +24,14 @@ final class TranscriptProcessingTests: XCTestCase {
   func testGlossaryReplacementUsesWordBoundaries() {
     let processor = TranscriptPostProcessor()
     let result = processor.process(
-      "issen improves transcription without changing dissension",
-      glossary: [.issen],
+      "acme improves transcription without changing academic",
+      glossary: [.acme],
       recentTranscripts: []
     )
 
     XCTAssertEqual(
       result,
-      "ISSEN improves transcription without changing dissension"
+      "ACME improves transcription without changing academic"
     )
   }
 

@@ -1,7 +1,7 @@
 # MaraSR
 
-Private, on-device dictation for Apple Silicon Macs. Hold Right Command, speak,
-and MaraSR pastes the transcript into the frontmost app.
+On-device dictation for Apple Silicon Macs. Hold Right Command, speak, and
+MaraSR pastes the transcript into the frontmost app.
 
 Audio, models, and history stay on this Mac. The app is sandboxed and ships
 **without a network entitlement**, so macOS blocks outbound connections at the
@@ -71,3 +71,8 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   test
 ```
+
+## License
+
+MaraSR is MIT-licensed. FluidAudio is Apache 2.0 and pulled in via Swift
+Package Manager. This repository does not include model weights.

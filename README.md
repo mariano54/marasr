@@ -61,6 +61,18 @@ If those files are missing, the app fails locally. It will not download them.
 Grant Microphone, Input Monitoring, and Accessibility. The menu-bar waveform
 stays available after you close the dashboard.
 
+## Diagnostics
+
+MaraSR logs app lifecycle, audio device changes, and dictation errors to the
+local unified log under the subsystem `com.mariano.marasr`. Transcript text is
+never logged. After a crash or failed dictation:
+
+```sh
+/usr/bin/log show --last 1h --info --predicate 'subsystem == "com.mariano.marasr"'
+```
+
+Crash reports land in `~/Library/Logs/DiagnosticReports/MaraSR-*.ips`.
+
 ## Tests
 
 ```sh

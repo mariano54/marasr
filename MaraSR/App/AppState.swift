@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import SwiftData
+import os
 
 enum DictationState: Equatable {
   case idle
@@ -70,6 +71,11 @@ final class AppState: ObservableObject {
         }
       }
     }
+    audioCapture.onCaptureInterrupted = { [weak self] error in
+      Task { @MainActor in
+        await self?.handleCaptureInterrupted(error)
+      }
+    }
     hotkeys.onPasteLast = { [weak self] in
       Task { @MainActor in
         await self?.pasteLast()
@@ -115,6 +121,8 @@ final class AppState: ObservableObject {
       return
     }
     errorMessage = nil
+    Log.models.notice("Preparing speech models")
+    let startedAt = ContinuousClock.now
     prepareTask = Task { [weak self] in
       guard let self else {
         return
@@ -132,7 +140,13 @@ final class AppState: ObservableObject {
         try await asrPreparation
         modelReady = true
         modelProgress = 1
+        Log.models.notice(
+          "Speech models ready in \(String(describing: ContinuousClock.now - startedAt), privacy: .public)"
+        )
       } catch {
+        Log.models.error(
+          "Speech models failed to load: \(String(describing: error), privacy: .public)"
+        )
         errorMessage = error.localizedDescription
       }
       prepareTask = nil
@@ -208,6 +222,9 @@ final class AppState: ObservableObject {
       try LaunchAtLoginController().setEnabled(enabled)
       settings.launchAtLogin = enabled
     } catch {
+      Log.app.error(
+        "Launch at login change failed: \(String(describing: error), privacy: .public)"
+      )
       errorMessage = error.localizedDescription
     }
   }
@@ -221,6 +238,9 @@ final class AppState: ObservableObject {
         )
         overlay.showSuccess()
       } catch {
+        Log.injection.error(
+          "Paste failed: \(String(describing: error), privacy: .public)"
+        )
         overlay.showError(error.localizedDescription)
       }
     }
@@ -238,20 +258,28 @@ final class AppState: ObservableObject {
     do {
       try hotkeys.start()
     } catch {
+      Log.hotkeys.error(
+        "Hotkey listener failed to start: \(String(describing: error), privacy: .public)"
+      )
       errorMessage = error.localizedDescription
     }
   }
 
   private func beginDictation() async {
     guard dictationState == .idle else {
+      Log.dictation.notice(
+        "Hotkey down ignored: dictation is \(String(describing: self.dictationState), privacy: .public)"
+      )
       return
     }
     guard permissions.allRequiredGranted else {
+      Log.dictation.notice("Dictation blocked: permissions missing")
       overlay.showError("Permissions required")
       showOnboarding()
       return
     }
     guard modelReady else {
+      Log.dictation.notice("Dictation blocked: models still loading")
       overlay.showError("Model is still loading")
       prepareModels()
       return
@@ -266,6 +294,9 @@ final class AppState: ObservableObject {
       sampleChain = nil
       overlay.showRecording()
       dictationState = .recording
+      Log.dictation.notice(
+        "Dictation started (target: \(self.targetApplication?.applicationName ?? "none", privacy: .public))"
+      )
 
       try audioCapture.start(
         discardingFirst: 0.2
@@ -281,9 +312,25 @@ final class AppState: ObservableObject {
         }
       }
     } catch {
-      dictationState = .idle
+      Log.dictation.error(
+        "Dictation could not start the microphone: \(String(describing: error), privacy: .public)"
+      )
+      audioCapture.stop()
+      resetDictation()
       overlay.showError(error.localizedDescription)
     }
+  }
+
+  /// The microphone stopped mid-recording and could not be restarted, so
+  /// finish with whatever was captured so far.
+  private func handleCaptureInterrupted(_ error: Error) async {
+    guard dictationState == .recording else {
+      return
+    }
+    Log.dictation.error(
+      "Microphone lost while recording; finishing early: \(String(describing: error), privacy: .public)"
+    )
+    await finishDictation()
   }
 
   private func enqueue(_ samples: [Float]) {
@@ -302,6 +349,9 @@ final class AppState: ObservableObject {
           try await self.transcribePreview(previewSamples)
         }
       } catch {
+        Log.dictation.error(
+          "Live transcription failed: \(String(describing: error), privacy: .public)"
+        )
         self.errorMessage = error.localizedDescription
       }
     }
@@ -328,6 +378,9 @@ final class AppState: ObservableObject {
         glossary: settings.glossary,
         recentTranscripts: recent
       )
+      Log.dictation.notice(
+        "Dictation finished: \(Date.now.timeIntervalSince(self.recordingStartedAt ?? .now), format: .fixed(precision: 1), privacy: .public) s, \(finalText.count, privacy: .public) chars"
+      )
       guard !finalText.isEmpty else {
         overlay.hide()
         resetDictation()
@@ -349,6 +402,9 @@ final class AppState: ObservableObject {
       lastTranscription = finalText
       overlay.showSuccess()
     } catch {
+      Log.dictation.error(
+        "Dictation failed to finish: \(String(describing: error), privacy: .public)"
+      )
       errorMessage = error.localizedDescription
       overlay.showError(error.localizedDescription)
     }
@@ -398,6 +454,9 @@ final class AppState: ObservableObject {
       try await injector.inject(text, into: injector.currentTarget())
       overlay.showSuccess()
     } catch {
+      Log.injection.error(
+        "Paste last failed: \(String(describing: error), privacy: .public)"
+      )
       overlay.showError(error.localizedDescription)
     }
   }
@@ -422,7 +481,13 @@ final class AppState: ObservableObject {
         destinationApplication: destination
       )
     )
-    try? modelContext.save()
+    do {
+      try modelContext.save()
+    } catch {
+      Log.app.error(
+        "Saving transcript history failed: \(String(describing: error), privacy: .public)"
+      )
+    }
   }
 
   private func resetDictation() {

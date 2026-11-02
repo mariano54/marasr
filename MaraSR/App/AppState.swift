@@ -37,6 +37,11 @@ final class AppState: ObservableObject {
 
   private var targetApplication: InjectionTarget?
   private var recordingStartedAt: Date?
+  // Logged when a dictation finishes, so an empty result shows whether the
+  // microphone delivered silence or the recognizer returned nothing.
+  private var capturedSampleCount = 0
+  private var capturePeakLevel: Float = 0
+  private var transcribedSegmentCount = 0
   private var sampleChain: Task<Void, Never>?
   private var prepareTask: Task<Void, Never>?
   private var onboardingWindow: OnboardingWindowController?
@@ -291,6 +296,9 @@ final class AppState: ObservableObject {
       await vad.startTurn()
       targetApplication = injector.currentTarget()
       recordingStartedAt = .now
+      capturedSampleCount = 0
+      capturePeakLevel = 0
+      transcribedSegmentCount = 0
       sampleChain = nil
       overlay.showRecording()
       dictationState = .recording
@@ -307,6 +315,8 @@ final class AppState: ObservableObject {
           else {
             return
           }
+          self.capturedSampleCount += samples.count
+          self.capturePeakLevel = max(self.capturePeakLevel, level)
           self.overlay.model.push(level: level)
           self.enqueue(samples)
         }
@@ -379,7 +389,7 @@ final class AppState: ObservableObject {
         recentTranscripts: recent
       )
       Log.dictation.notice(
-        "Dictation finished: \(Date.now.timeIntervalSince(self.recordingStartedAt ?? .now), format: .fixed(precision: 1), privacy: .public) s, \(finalText.count, privacy: .public) chars"
+        "Dictation finished: \(Date.now.timeIntervalSince(self.recordingStartedAt ?? .now), format: .fixed(precision: 1), privacy: .public) s, \(finalText.count, privacy: .public) chars (captured \(Double(self.capturedSampleCount) / 16_000, format: .fixed(precision: 1), privacy: .public) s audio, peak \(self.capturePeakLevel * 60 - 60, format: .fixed(precision: 0), privacy: .public) dBFS, \(self.transcribedSegmentCount, privacy: .public) speech segments)"
       )
       guard !finalText.isEmpty else {
         overlay.hide()
@@ -413,6 +423,7 @@ final class AppState: ObservableObject {
 
   private func transcribe(_ segments: [SpeechSegment]) async throws {
     for segment in segments {
+      transcribedSegmentCount += 1
       let rawText = try await parakeet.transcribe(
         samples: segment.samples
       )

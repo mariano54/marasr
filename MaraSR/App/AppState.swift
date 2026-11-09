@@ -27,6 +27,7 @@ final class AppState: ObservableObject {
   private let modelContext: ModelContext
   private let audioCapture = AudioCaptureService()
   private let listeningCue = ListeningCuePlayer()
+  private let volumeDucker = OutputVolumeDucker()
   private let vad = SileroVADService()
   private let parakeet = ParakeetService()
   private let assembler = TranscriptAssembler()
@@ -44,6 +45,7 @@ final class AppState: ObservableObject {
   private var transcribedSegmentCount = 0
   private var sampleChain: Task<Void, Never>?
   private var prepareTask: Task<Void, Never>?
+  private var duckTask: Task<Void, Never>?
   private var onboardingWindow: OnboardingWindowController?
   private var dashboardWindow: DashboardWindowController?
   private var cancellables: Set<AnyCancellable> = []
@@ -321,11 +323,13 @@ final class AppState: ObservableObject {
           self.enqueue(samples)
         }
       }
+      duckMusic()
     } catch {
       Log.dictation.error(
         "Dictation could not start the microphone: \(String(describing: error), privacy: .public)"
       )
       audioCapture.stop()
+      restoreMusic()
       resetDictation()
       overlay.showError(error.localizedDescription)
     }
@@ -341,6 +345,26 @@ final class AppState: ObservableObject {
       "Microphone lost while recording; finishing early: \(String(describing: error), privacy: .public)"
     )
     await finishDictation()
+  }
+
+  /// Lowers the output volume once the listening cue has played.
+  private func duckMusic() {
+    duckTask?.cancel()
+    duckTask = Task { [weak self] in
+      try? await Task.sleep(for: .milliseconds(200))
+      guard let self, !Task.isCancelled,
+        self.dictationState == .recording
+      else {
+        return
+      }
+      self.volumeDucker.duck()
+    }
+  }
+
+  private func restoreMusic() {
+    duckTask?.cancel()
+    duckTask = nil
+    volumeDucker.restore()
   }
 
   private func enqueue(_ samples: [Float]) {
@@ -373,6 +397,7 @@ final class AppState: ObservableObject {
     }
     dictationState = .transcribing
     audioCapture.stop()
+    restoreMusic()
     overlay.showTranscribing()
 
     await sampleChain?.value

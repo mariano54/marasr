@@ -30,6 +30,7 @@ final class AudioCaptureService {
   var onCaptureInterrupted: ((Error) -> Void)?
 
   private var engine = AVAudioEngine()
+  private let sessionMicrophone = CaptureSessionMicrophone()
   private var configurationObserver: NSObjectProtocol?
   private var engineIsStale = false
   private var tapInstalled = false
@@ -45,19 +46,49 @@ final class AudioCaptureService {
 
   init() {
     observeConfigurationChanges()
+    sessionMicrophone.onRuntimeError = { [weak self] error in
+      self?.onCaptureInterrupted?(error)
+    }
   }
 
   var isRunning: Bool {
-    engine.isRunning
+    engine.isRunning || sessionMicrophone.isRunning
+  }
+
+  /// Opening a Bluetooth headset's microphone switches the headset to its
+  /// call profile, which cuts music playing through it. Record from the
+  /// Mac's own microphone instead when there is one.
+  private var headsetBypassMicrophone: AudioDeviceID? {
+    guard let defaultInput = AudioDevices.defaultInput,
+      AudioDevices.isBluetooth(defaultInput)
+    else {
+      return nil
+    }
+    return AudioDevices.builtInInput
   }
 
   func start(
     discardingFirst initialDuration: TimeInterval = 0,
     sampleHandler: @escaping SampleHandler
   ) throws {
-    guard !engine.isRunning else {
-      Log.audio.notice("Microphone start ignored: engine already running")
+    guard !isRunning else {
+      Log.audio.notice("Microphone start ignored: already running")
       return
+    }
+    if let microphone = headsetBypassMicrophone, let targetFormat {
+      do {
+        try sessionMicrophone.start(
+          device: microphone,
+          sampleRate: targetFormat.sampleRate,
+          discardingFirst: initialDuration,
+          sampleHandler: sampleHandler
+        )
+        return
+      } catch {
+        Log.audio.error(
+          "Built-in microphone failed, using the default input: \(String(describing: error), privacy: .public)"
+        )
+      }
     }
     if engineIsStale {
       rebuildEngine(reason: "configuration changed since last use")
@@ -103,6 +134,7 @@ final class AudioCaptureService {
 
   func stop() {
     activeSampleHandler = nil
+    sessionMicrophone.stop()
     stopEngine()
   }
 
@@ -277,7 +309,7 @@ private final class AudioTapProcessor: @unchecked Sendable {
       guard !samples.isEmpty else {
         return
       }
-      sampleHandler(samples, normalizedLevel(samples))
+      sampleHandler(samples, AudioCaptureService.normalizedLevel(samples))
     } catch {
       // The tap runs every ~20 ms; log the first failure only.
       guard !loggedConversionFailure else {
@@ -334,8 +366,10 @@ private final class AudioTapProcessor: @unchecked Sendable {
       )
     )
   }
+}
 
-  private func normalizedLevel(
+extension AudioCaptureService {
+  nonisolated static func normalizedLevel(
     _ samples: [Float]
   ) -> Float {
     let meanSquare =

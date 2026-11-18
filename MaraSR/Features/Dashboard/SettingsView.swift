@@ -63,7 +63,7 @@ struct SettingsView: View {
 
       Section("Keywords") {
         Text(
-          "MaraSR applies these exact terms after transcription. Add comma-separated aliases for common mishearings."
+          "MaraSR listens for these terms and fixes them when it mishears them. Add comma-separated aliases for spellings it gets wrong, or for spoken forms like \"deploy dot sh\"."
         )
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -111,6 +111,15 @@ struct SettingsView: View {
               .fill(appState.modelReady ? .green : .orange)
               .frame(width: 7, height: 7)
             Text(appState.modelReady ? "Ready" : "Preparing")
+          }
+        }
+
+        if appState.modelReady {
+          LabeledContent("Keyword boosting") {
+            Text(
+              appState.boostedTermCount.map { "\($0) terms" }
+                ?? "Off: CTC model not found"
+            )
           }
         }
       }

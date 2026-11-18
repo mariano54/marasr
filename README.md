@@ -13,11 +13,32 @@ cannot fetch models even if a future dependency tries.
 - Hold **Right Command** to dictate; release to paste
 - **Control–Option–V** pastes the last transcript again
 - Live overlay while you speak, then a local history in the dashboard
-- Optional glossary for names and terms you want spelled a certain way
+- Keywords: names, products, and jargon MaraSR listens for and fixes when the
+  recognizer mishears them
 
 The recognizer is Parakeet Ultra, Moondream's post-trained NVIDIA Parakeet TDT
 0.6B v3 (CC-BY-4.0), through FluidAudio / Core ML. Voice activity uses Silero.
 Both run locally on the Neural Engine.
+
+## Keywords
+
+Add keywords in Settings, each with optional aliases. MaraSR uses them in two
+ways:
+
+- **Keyword boosting.** A small CTC model (Parakeet CTC 110M) scores each
+  keyword against the audio of every finished segment. FluidAudio's context
+  biasing then swaps a keyword in where the recognizer wrote something
+  similar ("Sonyox" → "Soniox"). MaraSR keeps a replacement only if the
+  heard word is a close match (similarity 0.7, or 0.8 for words of four
+  letters or fewer). It also refuses to take in a neighboring word
+  ("the router" → "OpenRouter") or to turn a word into a longer term that
+  contains it ("code" → "Xcode").
+- **Aliases** are exact text replacements, applied to everything, including
+  spoken file names ("deploy dot sh" → `deploy.sh`). Keywords containing
+  characters you can't say (`.`, `_`, `/`) are only matched this way.
+
+Boosting is English-only and optional. Without its model folder, only the
+aliases apply.
 
 ## Privacy
 
@@ -43,6 +64,12 @@ Hugging Face repo name:
 - `silero-vad` (from `FluidInference/silero-vad-coreml`)
 
 If those files are missing, the app fails locally. It will not download them.
+
+Keyword boosting also needs a third folder, which keeps its `-coreml` suffix:
+
+- `parakeet-ctc-110m-coreml` (from `FluidInference/parakeet-ctc-110m-coreml`:
+  `MelSpectrogram.mlmodelc`, `AudioEncoder.mlmodelc`, `vocab.json`,
+  `tokenizer.json`)
 
 ## Requirements
 

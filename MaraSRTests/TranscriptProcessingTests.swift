@@ -35,6 +35,132 @@ final class TranscriptProcessingTests: XCTestCase {
     )
   }
 
+  func testGlossaryPrefersTheLongestSpelling() {
+    let processor = TranscriptPostProcessor()
+    let result = processor.process(
+      "open smart turn dot py and check smart turn",
+      glossary: [
+        GlossaryEntry(canonical: "SmartTurn", aliases: ["smart turn"]),
+        GlossaryEntry(
+          canonical: "smart_turn.py",
+          aliases: ["smart turn dot py"]
+        ),
+      ],
+      recentTranscripts: []
+    )
+
+    XCTAssertEqual(result, "open smart_turn.py and check SmartTurn")
+  }
+
+  func testKeywordPolicyAcceptsMishearingsAndSplitTerms() {
+    XCTAssertTrue(accepts("Gladier", "Gladia", similarity: 0.71))
+    XCTAssertTrue(accepts("hammer spoon", "Hammerspoon", similarity: 0.6))
+    XCTAssertTrue(
+      KeywordPolicy.accepts(
+        span: "Eason",
+        term: "ISSEN",
+        aliases: ["Eason"],
+        similarity: 1
+      )
+    )
+  }
+
+  func testKeywordPolicyNeedsCloserMatchesForCommonWords() {
+    XCTAssertFalse(accepts("German", "Gemma", similarity: 0.67))
+    XCTAssertFalse(accepts("prod", "PRD", similarity: 0.75))
+    XCTAssertTrue(accepts("Karabina", "Karabiner", similarity: 0.78))
+  }
+
+  func testKeywordPolicyKeepsOrdinaryWordsInsideLongerTerms() {
+    XCTAssertFalse(accepts("router", "OpenRouter", similarity: 0.9))
+    XCTAssertFalse(accepts("Code", "Xcode", similarity: 0.9))
+    XCTAssertFalse(accepts("Xcode project", "Xcode", similarity: 0.9))
+  }
+
+  func testKeywordPolicyKeepsWordsNextToTheMatch() {
+    XCTAssertFalse(accepts("the router", "OpenRouter", similarity: 0.9))
+    XCTAssertFalse(accepts("and turn", "SmartTurn", similarity: 0.9))
+    XCTAssertFalse(accepts("Deepgram on", "Deepgram", similarity: 0.9))
+  }
+
+  func testKeywordPolicyKeepsOtherGlossaryTerms() {
+    let owners = KeywordPolicy.owners(of: [
+      GlossaryEntry(canonical: "VAD", aliases: ["V A D"]),
+      GlossaryEntry(canonical: "OpenAI", aliases: ["Open AI"]),
+      GlossaryEntry(canonical: "Soniox", aliases: ["Sonyox"]),
+    ])
+
+    XCTAssertTrue(
+      KeywordPolicy.overwritesAnotherTerm(
+        span: "Open VAD",
+        term: "OpenAI",
+        owners: owners
+      )
+    )
+    XCTAssertFalse(
+      KeywordPolicy.overwritesAnotherTerm(
+        span: "Sonyox",
+        term: "Soniox",
+        owners: owners
+      )
+    )
+  }
+
+  func testKeywordRangeFallbackSkipsEdgePunctuation() {
+    let text = "Do we still have credits on Core Weave?"
+    let range = KeywordPolicy.uniqueRange(of: "Core Weave?", in: text)
+    XCTAssertEqual(
+      range.map { KeywordPolicy.apply([($0, "CoreWeave")], to: text) },
+      "Do we still have credits on CoreWeave?"
+    )
+    XCTAssertNil(
+      KeywordPolicy.uniqueRange(of: "data dog", in: "data dog or data dog")
+    )
+  }
+
+  func testOnlySpeakableTermsAreBoosted() {
+    XCTAssertTrue(KeywordPolicy.isSpeakable("Claude Code"))
+    XCTAssertTrue(KeywordPolicy.isSpeakable("barge-in"))
+    XCTAssertFalse(KeywordPolicy.isSpeakable("deploy.sh"))
+    XCTAssertFalse(KeywordPolicy.isSpeakable("web_server.py"))
+    XCTAssertFalse(KeywordPolicy.isSpeakable(" "))
+  }
+
+  func testKeywordReplacementsUseUTF8Ranges() {
+    let text = "Café: compare Sonyox and Deat Graham."
+    let bytes = Array(text.utf8)
+    func range(of word: String) -> Range<Int> {
+      let needle = Array(word.utf8)
+      let start = (0...(bytes.count - needle.count)).first {
+        Array(bytes[$0..<($0 + needle.count)]) == needle
+      }!
+      return start..<(start + needle.count)
+    }
+
+    let result = KeywordPolicy.apply(
+      [
+        (range(of: "Sonyox"), "Soniox"),
+        (range(of: "Deat Graham"), "Deepgram"),
+      ],
+      to: text
+    )
+
+    XCTAssertEqual(result, "Café: compare Soniox and Deepgram.")
+  }
+
+  private func accepts(
+    _ span: String,
+    _ term: String,
+    similarity: Float
+  ) -> Bool {
+    KeywordPolicy.accepts(
+      span: span,
+      term: term,
+      aliases: [],
+      similarity: similarity
+    )
+  }
+
   func testRecentDistinctiveCasingIsRemembered() {
     let processor = TranscriptPostProcessor()
     let result = processor.process(

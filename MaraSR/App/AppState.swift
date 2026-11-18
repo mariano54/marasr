@@ -16,6 +16,7 @@ final class AppState: ObservableObject {
   @Published private(set) var modelReady = false
   @Published private(set) var modelProgress = 0.0
   @Published private(set) var modelFile = ""
+  @Published private(set) var boostedTermCount: Int?
   @Published private(set) var lastTranscription = ""
   @Published private(set) var tutorialHotkeyDown = false
   @Published var errorMessage: String?
@@ -99,6 +100,21 @@ final class AppState: ObservableObject {
       }
       .store(in: &cancellables)
 
+    // Glossary text fields save on every keystroke; rebuild the keyword
+    // booster once typing pauses.
+    settings.$glossary
+      .debounce(for: .seconds(1), scheduler: RunLoop.main)
+      .sink { [weak self] glossary in
+        guard let self else {
+          return
+        }
+        Task {
+          await self.parakeet.setGlossary(glossary)
+          self.boostedTermCount = await self.parakeet.boostedTermCount()
+        }
+      }
+      .store(in: &cancellables)
+
     permissions.$inputMonitoringGranted
       .removeDuplicates()
       .sink { [weak self] _ in
@@ -135,6 +151,9 @@ final class AppState: ObservableObject {
         return
       }
       do {
+        // Seed the glossary so the booster is built once, with the saved
+        // terms, rather than empty until the debounced update lands.
+        await parakeet.setGlossary(settings.glossary)
         async let vadPreparation: Void = vad.prepare()
         async let asrPreparation: Void = parakeet.prepare {
           [weak self] progress, file in
@@ -147,6 +166,7 @@ final class AppState: ObservableObject {
         try await asrPreparation
         modelReady = true
         modelProgress = 1
+        boostedTermCount = await parakeet.boostedTermCount()
         Log.models.notice(
           "Speech models ready in \(String(describing: ContinuousClock.now - startedAt), privacy: .public)"
         )
@@ -465,7 +485,10 @@ final class AppState: ObservableObject {
   }
 
   private func transcribePreview(_ samples: [Float]) async throws {
-    let preview = try await parakeet.transcribe(samples: samples)
+    let preview = try await parakeet.transcribe(
+      samples: samples,
+      boostKeywords: false
+    )
     let committed = await assembler.text()
     let combined = TranscriptAssembler.merge(
       [committed, preview].filter { !$0.isEmpty }

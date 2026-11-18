@@ -1,6 +1,8 @@
 import Foundation
 
 struct TranscriptPostProcessor: Sendable {
+  private let matchers = GlossaryMatcherCache()
+
   func process(
     _ text: String,
     glossary: [GlossaryEntry],
@@ -8,15 +10,8 @@ struct TranscriptPostProcessor: Sendable {
   ) -> String {
     var result = normalizeWhitespace(text)
 
-    for entry in glossary where !entry.canonical.isEmpty {
-      let terms = Set(entry.aliases + [entry.canonical])
-      for term in terms where !term.isEmpty {
-        result = replacingWholeTerm(
-          term,
-          with: entry.canonical,
-          in: result
-        )
-      }
+    if let matcher = matchers.matcher(for: glossary) {
+      result = matcher.apply(to: result)
     }
 
     let rememberedCasing = casingMemory(from: recentTranscripts)
@@ -93,5 +88,80 @@ struct TranscriptPostProcessor: Sendable {
         options: .regularExpression
       )
       .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+}
+
+/// Every glossary spelling in one case-insensitive pass. Longer forms are
+/// tried first, so "smart turn dot py" becomes the file name before
+/// "smart turn" alone can match.
+struct GlossaryMatcher: @unchecked Sendable {
+  // NSRegularExpression is immutable and safe to match from any thread.
+  private let expression: NSRegularExpression
+  private let canonicalByForm: [String: String]
+
+  init?(glossary: [GlossaryEntry]) {
+    var canonicalByForm: [String: String] = [:]
+    for entry in glossary where !entry.canonical.isEmpty {
+      for form in [entry.canonical] + entry.aliases where !form.isEmpty {
+        let key = form.lowercased()
+        if canonicalByForm[key] == nil {
+          canonicalByForm[key] = entry.canonical
+        }
+      }
+    }
+    let alternatives = canonicalByForm.keys
+      .sorted { $0.count != $1.count ? $0.count > $1.count : $0 < $1 }
+      .map(NSRegularExpression.escapedPattern(for:))
+    guard
+      !alternatives.isEmpty,
+      let expression = try? NSRegularExpression(
+        pattern:
+          "(?<![\\p{L}\\p{N}_])(?:\(alternatives.joined(separator: "|")))(?![\\p{L}\\p{N}_])",
+        options: [.caseInsensitive]
+      )
+    else {
+      return nil
+    }
+    self.expression = expression
+    self.canonicalByForm = canonicalByForm
+  }
+
+  func apply(to text: String) -> String {
+    let source = text as NSString
+    var result = ""
+    var position = 0
+    for match in expression.matches(
+      in: text,
+      range: NSRange(location: 0, length: source.length)
+    ) {
+      result += source.substring(
+        with: NSRange(
+          location: position,
+          length: match.range.location - position
+        )
+      )
+      let found = source.substring(with: match.range)
+      result += canonicalByForm[found.lowercased()] ?? found
+      position = match.range.location + match.range.length
+    }
+    return result + source.substring(from: position)
+  }
+}
+
+/// Keeps the compiled matcher until the glossary changes; rebuilding the
+/// patterns for a few hundred aliases on every transcript took ~0.4 s.
+private final class GlossaryMatcherCache: @unchecked Sendable {
+  private let lock = NSLock()
+  private var glossary: [GlossaryEntry]?
+  private var matcher: GlossaryMatcher?
+
+  func matcher(for glossary: [GlossaryEntry]) -> GlossaryMatcher? {
+    lock.withLock {
+      if glossary != self.glossary {
+        self.glossary = glossary
+        matcher = GlossaryMatcher(glossary: glossary)
+      }
+      return matcher
+    }
   }
 }

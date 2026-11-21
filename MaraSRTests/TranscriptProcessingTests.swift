@@ -1,3 +1,4 @@
+@preconcurrency import FluidAudio
 import SwiftData
 import SwiftUI
 import XCTest
@@ -148,6 +149,85 @@ final class TranscriptProcessingTests: XCTestCase {
     XCTAssertEqual(result, "Café: compare Soniox and Deepgram.")
   }
 
+  func testCandidateIndexSkipsOrdinarySpeechAndExactCanonicalMatches() {
+    let glossary = [
+      GlossaryEntry(canonical: "Soniox", aliases: ["Sonyox"]),
+      GlossaryEntry(canonical: "Karabiner", aliases: ["Karabina"]),
+      GlossaryEntry(canonical: "Hammerspoon", aliases: ["hammer spoon"]),
+      GlossaryEntry(canonical: "OpenRouter", aliases: []),
+      GlossaryEntry(canonical: "Gemma", aliases: []),
+      GlossaryEntry(canonical: "PRD", aliases: []),
+    ]
+    let index = makeCandidateIndex(for: glossary)
+
+    XCTAssertEqual(
+      index.activeTermIndices(
+        for: ["This", "is", "ordinary", "German", "router", "prod", "speech"],
+        minSimilarity: 0.6
+      ),
+      []
+    )
+    XCTAssertEqual(
+      index.activeTermIndices(
+        for: ["Compare", "Soniox", "and", "Hammerspoon"],
+        minSimilarity: 0.6
+      ),
+      []
+    )
+  }
+
+  func testCandidateIndexFindsMisheardSingleAndCompoundTerms() {
+    let glossary = [
+      GlossaryEntry(canonical: "Soniox", aliases: []),
+      GlossaryEntry(canonical: "Hammerspoon", aliases: []),
+      GlossaryEntry(canonical: "Karabiner", aliases: []),
+      GlossaryEntry(canonical: "VAD", aliases: []),
+    ]
+    let index = makeCandidateIndex(for: glossary)
+
+    XCTAssertEqual(
+      index.activeTermIndices(
+        for: ["Compare", "Sonyox", "in", "hammer", "spoon", "with", "VAD"],
+        minSimilarity: 0.6
+      ),
+      [0, 1, 3]
+    )
+  }
+
+  func testCandidateIndexExtractWordsMatchesSentencePieceBoundaries() {
+    let timings = [
+      TokenTiming(token: "▁Com", tokenId: 1, startTime: 0, endTime: 0.1, confidence: 1),
+      TokenTiming(token: "pare", tokenId: 2, startTime: 0.1, endTime: 0.2, confidence: 1),
+      TokenTiming(token: "<blank>", tokenId: 0, startTime: 0.2, endTime: 0.2, confidence: 1),
+      TokenTiming(token: "▁Sony", tokenId: 3, startTime: 0.2, endTime: 0.3, confidence: 1),
+      TokenTiming(token: "ox", tokenId: 4, startTime: 0.3, endTime: 0.4, confidence: 1),
+    ]
+
+    XCTAssertEqual(
+      KeywordCandidateIndex.extractWords(from: timings),
+      ["Compare", "Sonyox"]
+    )
+  }
+
+  private func makeCandidateIndex(
+    for glossary: [GlossaryEntry]
+  ) -> KeywordCandidateIndex {
+    var aliases: [String: [String]] = [:]
+    let terms = glossary.map { entry -> CustomVocabularyTerm in
+      aliases[entry.canonical, default: []] += entry.aliases
+      return CustomVocabularyTerm(
+        text: entry.canonical,
+        aliases: entry.aliases.isEmpty ? nil : entry.aliases
+      )
+    }
+    return KeywordCandidateIndex(
+      terms: terms,
+      minTermLength: 3,
+      aliases: aliases,
+      owners: KeywordPolicy.owners(of: glossary)
+    )
+  }
+
   private func accepts(
     _ span: String,
     _ term: String,
@@ -182,6 +262,44 @@ final class TranscriptProcessingTests: XCTestCase {
       tracker.speechEnded(at: 7_000),
       3_000..<7_000
     )
+  }
+
+  func testVADBoundarySplitsLongSpeechOnBriefDipAndHardCap() {
+    var tracker = VADBoundaryTracker(
+      minimumSpeechSamples: 3_072,
+      softMaxSpeechSamples: 10_000,
+      hardMaxSpeechSamples: 15_000,
+      softSplitProbabilityThreshold: 0.25,
+      softSplitSilenceChunks: 2
+    )
+    tracker.speechStarted(at: 0)
+
+    // Before softMaxSpeechSamples, brief dips do not split.
+    XCTAssertNil(tracker.advance(to: 5_000, speechProbability: 0.1))
+    XCTAssertNil(tracker.advance(to: 5_512, speechProbability: 0.1))
+    XCTAssertNil(tracker.advance(to: 9_000, speechProbability: 0.9))
+
+    // Once past softMaxSpeechSamples, 2 consecutive low-prob chunks split.
+    XCTAssertNil(tracker.advance(to: 10_500, speechProbability: 0.1))
+    XCTAssertEqual(
+      tracker.advance(to: 11_012, speechProbability: 0.1),
+      0..<11_012
+    )
+    XCTAssertEqual(tracker.speechStartSample, 11_012)
+
+    // With continuous high probability, hardMaxSpeechSamples splits at the
+    // lowest-probability dip inside the window.
+    XCTAssertNil(tracker.advance(to: 21_500, speechProbability: 0.8))
+    XCTAssertNil(tracker.advance(to: 23_000, speechProbability: 0.4))
+    XCTAssertNil(tracker.advance(to: 25_000, speechProbability: 0.9))
+    XCTAssertEqual(
+      tracker.advance(to: 26_100, speechProbability: 0.9),
+      11_012..<23_000
+    )
+    XCTAssertEqual(tracker.speechStartSample, 23_000)
+
+    // Finishing at or before the last emitted split emits nothing duplicate.
+    XCTAssertNil(tracker.finish(at: 23_000))
   }
 
   @MainActor

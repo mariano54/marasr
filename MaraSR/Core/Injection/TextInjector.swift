@@ -31,6 +31,8 @@ final class TextInjector {
     }
 
     if let target,
+      NSWorkspace.shared.frontmostApplication?.processIdentifier
+        != target.processIdentifier,
       let application = NSRunningApplication(
         processIdentifier: target.processIdentifier
       )

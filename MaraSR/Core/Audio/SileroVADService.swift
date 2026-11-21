@@ -115,6 +115,7 @@ actor SileroVADService {
     {
       segments.append(segment)
     } else if segments.isEmpty,
+      nextSequence == 0,
       let range = energyFallbackRange(in: allSamples),
       let segment = makeSegment(range: range)
     {
@@ -135,23 +136,31 @@ actor SileroVADService {
     )
     streamState = result.state
 
-    guard let event = result.event else {
-      return nil
-    }
-    switch event.kind {
-    case .speechStart:
-      boundaryTracker.speechStarted(at: event.sampleIndex)
-      return nil
-    case .speechEnd:
-      guard
-        let range = boundaryTracker.speechEnded(
-          at: event.sampleIndex
-        )
-      else {
-        return nil
+    if let event = result.event {
+      switch event.kind {
+      case .speechStart:
+        boundaryTracker.speechStarted(at: event.sampleIndex)
+      case .speechEnd:
+        guard
+          let range = boundaryTracker.speechEnded(
+            at: event.sampleIndex
+          )
+        else {
+          return nil
+        }
+        return makeSegment(range: range)
       }
-      return makeSegment(range: range)
     }
+
+    guard
+      let range = boundaryTracker.advance(
+        to: streamState.processedSamples,
+        speechProbability: result.probability
+      )
+    else {
+      return nil
+    }
+    return makeSegment(range: range)
   }
 
   private func makeSegment(range: Range<Int>) -> SpeechSegment? {

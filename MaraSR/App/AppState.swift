@@ -44,7 +44,9 @@ final class AppState: ObservableObject {
   private var capturedSampleCount = 0
   private var capturePeakLevel: Float = 0
   private var transcribedSegmentCount = 0
-  private var sampleChain: Task<Void, Never>?
+  private var pendingSamples: [Float] = []
+  private var processingTask: Task<Void, Never>?
+  private var cachedRecentTranscripts: [String] = []
   private var prepareTask: Task<Void, Never>?
   private var duckTask: Task<Void, Never>?
   private var onboardingWindow: OnboardingWindowController?
@@ -321,7 +323,9 @@ final class AppState: ObservableObject {
       capturedSampleCount = 0
       capturePeakLevel = 0
       transcribedSegmentCount = 0
-      sampleChain = nil
+      pendingSamples.removeAll(keepingCapacity: true)
+      processingTask = nil
+      cachedRecentTranscripts = recentTranscripts()
       overlay.showRecording()
       dictationState = .recording
       Log.dictation.notice(
@@ -388,25 +392,42 @@ final class AppState: ObservableObject {
   }
 
   private func enqueue(_ samples: [Float]) {
-    let previous = sampleChain
-    sampleChain = Task { [weak self] in
-      await previous?.value
-      guard let self,
-        self.dictationState != .idle
-      else {
+    pendingSamples.append(contentsOf: samples)
+    guard processingTask == nil else {
+      return
+    }
+    processingTask = Task { [weak self] in
+      await self?.drainPendingSamples()
+    }
+  }
+
+  private func drainPendingSamples() async {
+    defer { processingTask = nil }
+    while !pendingSamples.isEmpty {
+      guard dictationState != .idle else {
+        pendingSamples.removeAll(keepingCapacity: true)
         return
       }
+      let batch = pendingSamples
+      pendingSamples.removeAll(keepingCapacity: true)
       do {
-        let segments = try await self.vad.append(samples)
-        try await self.transcribe(segments)
-        if let previewSamples = await self.vad.previewSamplesIfNeeded() {
-          try await self.transcribePreview(previewSamples)
+        let segments = try await vad.append(batch)
+        if !segments.isEmpty {
+          try await transcribe(segments)
+        }
+        // Only run live previews while actively recording and caught up to
+        // live audio. Never run a preview once the hotkey is released.
+        if dictationState == .recording,
+          pendingSamples.isEmpty,
+          let previewSamples = await vad.previewSamplesIfNeeded()
+        {
+          try await transcribePreview(previewSamples)
         }
       } catch {
         Log.dictation.error(
           "Live transcription failed: \(String(describing: error), privacy: .public)"
         )
-        self.errorMessage = error.localizedDescription
+        errorMessage = error.localizedDescription
       }
     }
   }
@@ -415,26 +436,33 @@ final class AppState: ObservableObject {
     guard dictationState == .recording else {
       return
     }
+    let finishStartedAt = ContinuousClock.now
     dictationState = .transcribing
     audioCapture.stop()
     restoreMusic()
     overlay.showTranscribing()
 
-    await sampleChain?.value
-    sampleChain = nil
+    await processingTask?.value
+    processingTask = nil
 
     do {
+      if !pendingSamples.isEmpty {
+        let trailing = pendingSamples
+        pendingSamples.removeAll(keepingCapacity: true)
+        let trailingSegments = try await vad.append(trailing)
+        try await transcribe(trailingSegments)
+      }
       let finalSegments = try await vad.finishTurn()
       try await transcribe(finalSegments)
       let rawText = await assembler.text()
-      let recent = recentTranscripts()
       let finalText = postProcessor.process(
         rawText,
         glossary: settings.glossary,
-        recentTranscripts: recent
+        recentTranscripts: cachedRecentTranscripts
       )
+      let finishElapsed = ContinuousClock.now - finishStartedAt
       Log.dictation.notice(
-        "Dictation finished: \(Date.now.timeIntervalSince(self.recordingStartedAt ?? .now), format: .fixed(precision: 1), privacy: .public) s, \(finalText.count, privacy: .public) chars (captured \(Double(self.capturedSampleCount) / 16_000, format: .fixed(precision: 1), privacy: .public) s audio, peak \(self.capturePeakLevel * 60 - 60, format: .fixed(precision: 0), privacy: .public) dBFS, \(self.transcribedSegmentCount, privacy: .public) speech segments)"
+        "Dictation finished: \(Date.now.timeIntervalSince(self.recordingStartedAt ?? .now), format: .fixed(precision: 1), privacy: .public) s, \(finalText.count, privacy: .public) chars (captured \(Double(self.capturedSampleCount) / 16_000, format: .fixed(precision: 1), privacy: .public) s audio, peak \(self.capturePeakLevel * 60 - 60, format: .fixed(precision: 0), privacy: .public) dBFS, \(self.transcribedSegmentCount, privacy: .public) speech segments, finish \(String(describing: finishElapsed), privacy: .public))"
       )
       guard !finalText.isEmpty else {
         overlay.hide()
@@ -476,11 +504,13 @@ final class AppState: ObservableObject {
         sequence: segment.sequence,
         text: rawText
       )
-      overlay.model.transcript = postProcessor.process(
-        assembled,
-        glossary: settings.glossary,
-        recentTranscripts: recentTranscripts()
-      )
+      if dictationState == .recording {
+        overlay.model.transcript = postProcessor.process(
+          assembled,
+          glossary: settings.glossary,
+          recentTranscripts: cachedRecentTranscripts
+        )
+      }
     }
   }
 
@@ -489,6 +519,9 @@ final class AppState: ObservableObject {
       samples: samples,
       boostKeywords: false
     )
+    guard dictationState == .recording else {
+      return
+    }
     let committed = await assembler.text()
     let combined = TranscriptAssembler.merge(
       [committed, preview].filter { !$0.isEmpty }
@@ -496,7 +529,7 @@ final class AppState: ObservableObject {
     overlay.model.transcript = postProcessor.process(
       combined,
       glossary: settings.glossary,
-      recentTranscripts: recentTranscripts()
+      recentTranscripts: cachedRecentTranscripts
     )
   }
 
@@ -553,5 +586,7 @@ final class AppState: ObservableObject {
     dictationState = .idle
     targetApplication = nil
     recordingStartedAt = nil
+    pendingSamples.removeAll(keepingCapacity: true)
+    cachedRecentTranscripts = []
   }
 }

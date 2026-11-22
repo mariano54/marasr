@@ -1,140 +1,56 @@
 @preconcurrency import AVFoundation
+import Foundation
 
+/// Plays the short listening chime without keeping an idle AVAudioEngine alive
+/// across display or output-device changes, and off the main actor so waking
+/// an external display output never stalls hotkeys or UI.
 @MainActor
 final class ListeningCuePlayer {
-  private static let sampleRate = 48_000.0
-  private static let duration = 0.18
+  private nonisolated static let sampleRate = 48_000.0
+  private nonisolated static let duration = 0.18
 
-  private var engine = AVAudioEngine()
-  private var player = AVAudioPlayerNode()
-  private let format = AVAudioFormat(
-    standardFormatWithSampleRate: sampleRate,
-    channels: 1
-  )
-  private let buffer: AVAudioPCMBuffer?
-  private var stopTask: Task<Void, Never>?
-  private var configurationObserver: NSObjectProtocol?
-  private var engineIsStale = false
+  private let runner: CuePlaybackRunner
 
   init() {
-    buffer = format.flatMap(Self.makeBuffer)
-    configureEngine()
+    runner = CuePlaybackRunner(wavData: Self.makeWAVData())
   }
 
   func play() {
-    guard let buffer else {
-      return
-    }
-    stopTask?.cancel()
-    if engineIsStale {
-      rebuildEngine(reason: "configuration changed since last use")
-    }
-    do {
-      try schedule(buffer)
-    } catch {
-      rebuildEngine(reason: "cue playback failed")
-      do {
-        try schedule(buffer)
-      } catch {
-        // The cue is cosmetic; dictation goes ahead without it.
-        Log.audio.error(
-          "Listening cue skipped: \(String(describing: error), privacy: .public)"
-        )
-        engineIsStale = true
-        return
-      }
-    }
-    stopTask = Task { [weak self] in
-      try? await Task.sleep(for: .milliseconds(240))
-      guard !Task.isCancelled else {
-        return
-      }
-      self?.player.stop()
-      self?.engine.stop()
-    }
+    runner.play()
   }
 
-  private func schedule(_ buffer: AVAudioPCMBuffer) throws {
-    let engine = engine
-    let player = player
-    try ObjCException.catching("listening cue", log: Log.audio) {
-      player.stop()
-      if !engine.isRunning {
-        try engine.start()
-      }
-      player.scheduleBuffer(buffer, at: nil, options: .interrupts)
-      player.play()
-    }
-  }
+  nonisolated static func makeWAVData() -> Data {
+    let frameCount = Int(sampleRate * duration)
+    let byteCount = frameCount * MemoryLayout<Float32>.size
+    var data = Data(capacity: 44 + byteCount)
 
-  private func configureEngine() {
-    let engine = engine
-    let player = player
-    let format = format
-    do {
-      try ObjCException.catching("listening cue setup", log: Log.audio) {
-        engine.attach(player)
-        if let format {
-          engine.connect(
-            player,
-            to: engine.mainMixerNode,
-            format: format
-          )
-        }
-        engine.prepare()
-      }
-    } catch {
-      engineIsStale = true
-    }
-    configurationObserver = NotificationCenter.default.addObserver(
-      forName: .AVAudioEngineConfigurationChange,
-      object: engine,
-      queue: .main
-    ) { [weak self] _ in
-      Task { @MainActor in
-        Log.audio.notice("Output configuration changed; cue engine will be rebuilt")
-        self?.engineIsStale = true
-      }
-    }
-  }
-
-  private func rebuildEngine(reason: String) {
-    Log.audio.notice(
-      "Rebuilding cue engine: \(reason, privacy: .public)"
-    )
-    stopTask?.cancel()
-    player.stop()
-    engine.stop()
-    if let configurationObserver {
-      NotificationCenter.default.removeObserver(configurationObserver)
-    }
-    engine = AVAudioEngine()
-    player = AVAudioPlayerNode()
-    engineIsStale = false
-    configureEngine()
-  }
-
-  private static func makeBuffer(
-    format: AVAudioFormat
-  ) -> AVAudioPCMBuffer? {
-    let frameCount = AVAudioFrameCount(sampleRate * duration)
-    guard
-      let buffer = AVAudioPCMBuffer(
-        pcmFormat: format,
-        frameCapacity: frameCount
-      ),
-      let samples = buffer.floatChannelData?.pointee
-    else {
-      return nil
+    func appendLE<T: FixedWidthInteger>(_ value: T) {
+      var littleEndian = value.littleEndian
+      withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
     }
 
-    buffer.frameLength = frameCount
+    data.append(contentsOf: "RIFF".utf8)
+    appendLE(UInt32(36 + byteCount))
+    data.append(contentsOf: "WAVE".utf8)
+
+    data.append(contentsOf: "fmt ".utf8)
+    appendLE(UInt32(16))
+    appendLE(UInt16(3))  // IEEE 32-bit float PCM
+    appendLE(UInt16(1))  // mono
+    appendLE(UInt32(sampleRate))
+    appendLE(UInt32(sampleRate) * 4)
+    appendLE(UInt16(4))
+    appendLE(UInt16(32))
+
+    data.append(contentsOf: "data".utf8)
+    appendLE(UInt32(byteCount))
+
     let notes: [(start: Double, frequency: Double, gain: Double)] = [
       (0, 587.33, 0.36),
       (0.028, 739.99, 0.26),
       (0.056, 880, 0.19),
     ]
-    for frame in 0..<Int(frameCount) {
+    for frame in 0..<frameCount {
       let time = Double(frame) / sampleRate
       let releaseStart = duration - 0.045
       let releaseProgress = max(
@@ -161,8 +77,59 @@ final class ListeningCuePlayer {
           note.gain * envelope
           * (fundamental + 0.07 * harmonic)
       }
-      samples[frame] = Float(value * 0.045)
+      var sample = Float32(value * 0.045).bitPattern.littleEndian
+      withUnsafeBytes(of: &sample) { data.append(contentsOf: $0) }
     }
-    return buffer
+    return data
+  }
+}
+
+private final class CuePlaybackRunner: @unchecked Sendable {
+  private let queue = DispatchQueue(
+    label: "com.mariano.marasr.listening-cue",
+    qos: .userInitiated
+  )
+  private let wavData: Data
+  private var activePlayer: AVAudioPlayer?
+  private var releaseWorkItem: DispatchWorkItem?
+
+  init(wavData: Data) {
+    self.wavData = wavData
+  }
+
+  func play() {
+    queue.async { [weak self] in
+      guard let self else {
+        return
+      }
+      self.releaseWorkItem?.cancel()
+      self.releaseWorkItem = nil
+      self.activePlayer?.stop()
+      self.activePlayer = nil
+
+      do {
+        let player = try AVAudioPlayer(
+          data: self.wavData,
+          fileTypeHint: AVFileType.wav.rawValue
+        )
+        guard player.play() else {
+          Log.audio.error("Listening cue skipped: AVAudioPlayer.play() returned false")
+          return
+        }
+        self.activePlayer = player
+        let release = DispatchWorkItem { [weak self] in
+          self?.activePlayer?.stop()
+          self?.activePlayer = nil
+          self?.releaseWorkItem = nil
+        }
+        self.releaseWorkItem = release
+        self.queue.asyncAfter(deadline: .now() + .milliseconds(350), execute: release)
+      } catch {
+        // The cue is cosmetic; dictation goes ahead without it.
+        Log.audio.error(
+          "Listening cue skipped: \(String(describing: error), privacy: .public)"
+        )
+      }
+    }
   }
 }

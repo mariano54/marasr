@@ -1,3 +1,4 @@
+import AVFoundation
 @preconcurrency import FluidAudio
 import SwiftData
 import SwiftUI
@@ -370,5 +371,60 @@ final class TranscriptProcessingTests: XCTestCase {
 
     XCTAssertEqual(longSize.width, 640, accuracy: 1)
     XCTAssertGreaterThan(longSize.height, shortSize.height + 40)
+  }
+
+  func testPreferredDeviceUIDsBypassesBluetoothWhenBuiltInAvailable() {
+    XCTAssertEqual(
+      AudioCaptureService.preferredDeviceUIDs(
+        defaultInputUID: "AirPods-UID",
+        defaultInputIsBluetooth: true,
+        builtInInputUID: "BuiltInMicrophoneDevice"
+      ),
+      ["BuiltInMicrophoneDevice", "AirPods-UID"]
+    )
+    XCTAssertEqual(
+      AudioCaptureService.preferredDeviceUIDs(
+        defaultInputUID: "AirPods-UID",
+        defaultInputIsBluetooth: true,
+        builtInInputUID: nil
+      ),
+      ["AirPods-UID"]
+    )
+    XCTAssertEqual(
+      AudioCaptureService.preferredDeviceUIDs(
+        defaultInputUID: "BuiltInMicrophoneDevice",
+        defaultInputIsBluetooth: false,
+        builtInInputUID: "BuiltInMicrophoneDevice"
+      ),
+      ["BuiltInMicrophoneDevice"]
+    )
+    XCTAssertEqual(
+      AudioCaptureService.preferredDeviceUIDs(
+        defaultInputUID: nil,
+        defaultInputIsBluetooth: false,
+        builtInInputUID: nil
+      ),
+      []
+    )
+  }
+
+  func testNormalizedLevelHandlesEmptyAndActiveAudio() {
+    XCTAssertEqual(AudioCaptureService.normalizedLevel([]), 0)
+    XCTAssertEqual(AudioCaptureService.normalizedLevel([0, 0, 0]), 0)
+    XCTAssertEqual(AudioCaptureService.normalizedLevel([1, -1, 1, -1]), 1, accuracy: 0.001)
+  }
+
+  func testListeningCueProducesValidPlayableWAV() throws {
+    let data = ListeningCuePlayer.makeWAVData()
+    XCTAssertGreaterThan(data.count, 44)
+    XCTAssertEqual(String(decoding: data.prefix(4), as: UTF8.self), "RIFF")
+    XCTAssertEqual(String(decoding: data[8..<12], as: UTF8.self), "WAVE")
+
+    let player = try AVAudioPlayer(
+      data: data,
+      fileTypeHint: AVFileType.wav.rawValue
+    )
+    XCTAssertEqual(player.duration, 0.18, accuracy: 0.005)
+    XCTAssertEqual(player.numberOfChannels, 1)
   }
 }

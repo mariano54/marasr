@@ -25,353 +25,114 @@ enum AudioCaptureError: LocalizedError {
 final class AudioCaptureService {
   typealias SampleHandler = @Sendable (_ samples: [Float], _ level: Float) -> Void
 
-  /// Called when capture stopped mid-recording and could not be restarted
-  /// after Core Audio reconfigured the engine.
+  /// Called when capture stops mid-recording because the microphone
+  /// disconnected or hit a runtime error.
   var onCaptureInterrupted: ((Error) -> Void)?
 
-  private var engine = AVAudioEngine()
-  private let sessionMicrophone = CaptureSessionMicrophone()
-  private var configurationObserver: NSObjectProtocol?
-  private var engineIsStale = false
-  private var tapInstalled = false
-  private var processor: AudioTapProcessor?
-  private var activeSampleHandler: SampleHandler?
+  static let targetSampleRate: Double = 16_000
 
-  private let targetFormat = AVAudioFormat(
-    commonFormat: .pcmFormatFloat32,
-    sampleRate: 16_000,
-    channels: 1,
-    interleaved: false
-  )
+  private let sessionMicrophone = CaptureSessionMicrophone()
+  private var captureGeneration: UInt64 = 0
 
   init() {
-    observeConfigurationChanges()
     sessionMicrophone.onRuntimeError = { [weak self] error in
       self?.onCaptureInterrupted?(error)
     }
   }
 
   var isRunning: Bool {
-    engine.isRunning || sessionMicrophone.isRunning
-  }
-
-  /// Opening a Bluetooth headset's microphone switches the headset to its
-  /// call profile, which cuts music playing through it. Record from the
-  /// Mac's own microphone instead when there is one.
-  private var headsetBypassMicrophone: AudioDeviceID? {
-    guard let defaultInput = AudioDevices.defaultInput,
-      AudioDevices.isBluetooth(defaultInput)
-    else {
-      return nil
-    }
-    return AudioDevices.builtInInput
+    sessionMicrophone.isRunning
   }
 
   func start(
     discardingFirst initialDuration: TimeInterval = 0,
     sampleHandler: @escaping SampleHandler
-  ) throws {
+  ) async throws {
     guard !isRunning else {
       Log.audio.notice("Microphone start ignored: already running")
       return
     }
-    if let microphone = headsetBypassMicrophone, let targetFormat {
+    captureGeneration &+= 1
+    let generation = captureGeneration
+
+    let defaultInput = AudioDevices.defaultInput
+    let defaultInputUID = defaultInput.flatMap(AudioDevices.uid)
+    let defaultIsBluetooth = defaultInput.map(AudioDevices.isBluetooth) ?? false
+    let builtInUID =
+      defaultIsBluetooth
+      ? AudioDevices.builtInInput.flatMap(AudioDevices.uid)
+      : nil
+
+    let candidateUIDs: [String?] =
+      Self.preferredDeviceUIDs(
+        defaultInputUID: defaultInputUID,
+        defaultInputIsBluetooth: defaultIsBluetooth,
+        builtInInputUID: builtInUID
+      ).map(Optional.some) + [nil]
+
+    var lastError: Error = AudioCaptureError.inputUnavailable
+    for (index, candidateUID) in candidateUIDs.enumerated() {
+      guard captureGeneration == generation else {
+        return
+      }
       do {
-        try sessionMicrophone.start(
-          device: microphone,
-          sampleRate: targetFormat.sampleRate,
+        try await sessionMicrophone.start(
+          deviceUniqueID: candidateUID,
+          sampleRate: Self.targetSampleRate,
           discardingFirst: initialDuration,
           sampleHandler: sampleHandler
         )
         return
       } catch {
-        Log.audio.error(
-          "Built-in microphone failed, using the default input: \(String(describing: error), privacy: .public)"
-        )
+        guard captureGeneration == generation else {
+          return
+        }
+        lastError = error
+        let label = candidateUID ?? "default audio device"
+        if index + 1 < candidateUIDs.count {
+          Log.audio.error(
+            "Microphone \(label, privacy: .public) failed, trying fallback: \(String(describing: error), privacy: .public)"
+          )
+        } else {
+          Log.audio.error(
+            "Microphone start failed on \(label, privacy: .public): \(String(describing: error), privacy: .public)"
+          )
+        }
       }
     }
-    if engineIsStale {
-      rebuildEngine(reason: "configuration changed since last use")
-    }
-    try startWithRetry(
-      discardingFirst: initialDuration,
-      sampleHandler: sampleHandler
-    )
-    activeSampleHandler = sampleHandler
-  }
-
-  private func startWithRetry(
-    discardingFirst initialDuration: TimeInterval,
-    sampleHandler: @escaping SampleHandler
-  ) throws {
-    do {
-      try startEngine(
-        discardingFirst: initialDuration,
-        sampleHandler: sampleHandler
-      )
-    } catch {
-      // A device or sample-rate switch leaves the engine with a stale
-      // format. A fresh engine reads the current hardware format.
-      Log.audio.error(
-        "Microphone start failed, retrying on a fresh engine: \(String(describing: error), privacy: .public)"
-      )
-      rebuildEngine(reason: "start failed")
-      do {
-        try startEngine(
-          discardingFirst: initialDuration,
-          sampleHandler: sampleHandler
-        )
-      } catch {
-        Log.audio.error(
-          "Microphone start failed twice: \(String(describing: error), privacy: .public)"
-        )
-        stopEngine()
-        engineIsStale = true
-        throw error
-      }
-    }
+    throw lastError
   }
 
   func stop() {
-    activeSampleHandler = nil
+    captureGeneration &+= 1
     sessionMicrophone.stop()
-    stopEngine()
   }
 
-  private func stopEngine() {
-    // The engine stops itself on a configuration change, so the tap can
-    // outlive `isRunning`. A leftover tap makes the next install throw.
-    if tapInstalled {
-      let input = engine.inputNode
-      try? ObjCException.catching("removeTap", log: Log.audio) {
-        input.removeTap(onBus: 0)
-      }
-      tapInstalled = false
+  /// Opening a Bluetooth headset's microphone switches the headset to its
+  /// call profile, which cuts music playing through it. Prefer the Mac's own
+  /// microphone first when the default input is Bluetooth and fall back to
+  /// the default input if needed.
+  nonisolated static func preferredDeviceUIDs(
+    defaultInputUID: String?,
+    defaultInputIsBluetooth: Bool,
+    builtInInputUID: String?
+  ) -> [String] {
+    var result: [String] = []
+    if defaultInputIsBluetooth, let builtInInputUID {
+      result.append(builtInInputUID)
     }
-    if engine.isRunning {
-      engine.stop()
+    if let defaultInputUID, !result.contains(defaultInputUID) {
+      result.append(defaultInputUID)
     }
-    processor = nil
+    return result
   }
 
-  private func startEngine(
-    discardingFirst initialDuration: TimeInterval,
-    sampleHandler: @escaping SampleHandler
-  ) throws {
-    guard let targetFormat else {
-      throw AudioCaptureError.converterUnavailable
-    }
-
-    let input = engine.inputNode
-    let hardwareFormat = input.inputFormat(forBus: 0)
-    let inputFormat = input.outputFormat(forBus: 0)
-    Log.audio.notice(
-      "Starting microphone: hardware \(Self.describe(hardwareFormat), privacy: .public), tap \(Self.describe(inputFormat), privacy: .public)"
-    )
-    guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
-      throw AudioCaptureError.inputUnavailable
-    }
-    guard hardwareFormat.sampleRate == inputFormat.sampleRate else {
-      throw AudioCaptureError.formatMismatch(
-        hardware: hardwareFormat.sampleRate,
-        tap: inputFormat.sampleRate
-      )
-    }
-    guard
-      let converter = AVAudioConverter(
-        from: inputFormat,
-        to: targetFormat
-      )
-    else {
-      throw AudioCaptureError.converterUnavailable
-    }
-
-    let processor = AudioTapProcessor(
-      converter: converter,
-      targetFormat: targetFormat,
-      samplesToDiscard: Int(
-        targetFormat.sampleRate * initialDuration
-      ),
-      sampleHandler: sampleHandler
-    )
-    do {
-      try ObjCException.catching("installTap", log: Log.audio) {
-        processor.installTap(on: input, format: inputFormat)
-      }
-      tapInstalled = true
-      self.processor = processor
-
-      let engine = engine
-      engine.prepare()
-      try ObjCException.catching("engine.start", log: Log.audio) {
-        try engine.start()
-      }
-    } catch {
-      stopEngine()
-      throw error
-    }
-  }
-
-  private func rebuildEngine(reason: String) {
-    Log.audio.notice(
-      "Rebuilding audio engine: \(reason, privacy: .public)"
-    )
-    stopEngine()
-    if let configurationObserver {
-      NotificationCenter.default.removeObserver(configurationObserver)
-    }
-    engine = AVAudioEngine()
-    engineIsStale = false
-    observeConfigurationChanges()
-  }
-
-  private func observeConfigurationChanges() {
-    configurationObserver = NotificationCenter.default.addObserver(
-      forName: .AVAudioEngineConfigurationChange,
-      object: engine,
-      queue: .main
-    ) { [weak self] _ in
-      Task { @MainActor in
-        self?.handleConfigurationChange()
-      }
-    }
-  }
-
-  private func handleConfigurationChange() {
-    Log.audio.notice(
-      "Audio configuration changed (engine running: \(self.engine.isRunning, privacy: .public), tap installed: \(self.tapInstalled, privacy: .public)); engine will be rebuilt"
-    )
-    engineIsStale = true
-
-    // Core Audio stops the engine on a reconfiguration. Mid-recording,
-    // restart on a fresh engine so the dictation keeps going.
-    guard let sampleHandler = activeSampleHandler, !engine.isRunning else {
-      return
-    }
-    rebuildEngine(reason: "restarting capture mid-recording")
-    do {
-      try startWithRetry(discardingFirst: 0, sampleHandler: sampleHandler)
-      Log.audio.notice("Microphone capture resumed after configuration change")
-    } catch {
-      activeSampleHandler = nil
-      Log.audio.error(
-        "Microphone capture could not resume: \(String(describing: error), privacy: .public)"
-      )
-      onCaptureInterrupted?(error)
-    }
-  }
-
-  private static func describe(_ format: AVAudioFormat) -> String {
-    "\(Int(format.sampleRate)) Hz \(format.channelCount) ch"
-  }
-}
-
-private final class AudioTapProcessor: @unchecked Sendable {
-  private let converter: AVAudioConverter
-  private let targetFormat: AVAudioFormat
-  private let sampleHandler: AudioCaptureService.SampleHandler
-  private var samplesToDiscard: Int
-  private var loggedConversionFailure = false
-
-  init(
-    converter: AVAudioConverter,
-    targetFormat: AVAudioFormat,
-    samplesToDiscard: Int,
-    sampleHandler: @escaping AudioCaptureService.SampleHandler
-  ) {
-    self.converter = converter
-    self.targetFormat = targetFormat
-    self.samplesToDiscard = samplesToDiscard
-    self.sampleHandler = sampleHandler
-  }
-
-  func installTap(
-    on input: AVAudioInputNode,
-    format: AVAudioFormat
-  ) {
-    input.installTap(
-      onBus: 0,
-      bufferSize: 1_024,
-      format: format
-    ) { [self] buffer, _ in
-      process(buffer)
-    }
-  }
-
-  func process(_ buffer: AVAudioPCMBuffer) {
-    do {
-      var samples = try convert(buffer)
-      if samplesToDiscard > 0 {
-        let discardedCount = min(samplesToDiscard, samples.count)
-        samples.removeFirst(discardedCount)
-        samplesToDiscard -= discardedCount
-      }
-      guard !samples.isEmpty else {
-        return
-      }
-      sampleHandler(samples, AudioCaptureService.normalizedLevel(samples))
-    } catch {
-      // The tap runs every ~20 ms; log the first failure only.
-      guard !loggedConversionFailure else {
-        return
-      }
-      loggedConversionFailure = true
-      Log.audio.error(
-        "Microphone buffer conversion failed (\(Int(buffer.format.sampleRate)) Hz \(buffer.format.channelCount) ch): \(String(describing: error), privacy: .public)"
-      )
-    }
-  }
-
-  private func convert(
-    _ input: AVAudioPCMBuffer
-  ) throws -> [Float] {
-    let ratio = targetFormat.sampleRate / input.format.sampleRate
-    let capacity =
-      AVAudioFrameCount(
-        ceil(Double(input.frameLength) * ratio)
-      ) + 1
-    guard
-      let output = AVAudioPCMBuffer(
-        pcmFormat: targetFormat,
-        frameCapacity: capacity
-      )
-    else {
-      throw AudioCaptureError.conversionFailed
-    }
-
-    let inputState = ConverterInputState()
-    var conversionError: NSError?
-    let status = converter.convert(
-      to: output,
-      error: &conversionError
-    ) { _, inputStatus in
-      if inputState.supplied {
-        inputStatus.pointee = .noDataNow
-        return nil
-      }
-      inputState.supplied = true
-      inputStatus.pointee = .haveData
-      return input
-    }
-
-    guard status != .error, conversionError == nil,
-      let channel = output.floatChannelData?.pointee
-    else {
-      throw conversionError ?? AudioCaptureError.conversionFailed
-    }
-    return Array(
-      UnsafeBufferPointer(
-        start: channel,
-        count: Int(output.frameLength)
-      )
-    )
-  }
-}
-
-extension AudioCaptureService {
   nonisolated static func normalizedLevel(
     _ samples: [Float]
   ) -> Float {
+    guard !samples.isEmpty else {
+      return 0
+    }
     let meanSquare =
       samples.reduce(Float.zero) {
         $0 + ($1 * $1)
@@ -379,8 +140,4 @@ extension AudioCaptureService {
     let decibels = 20 * log10(max(sqrt(meanSquare), 0.000_001))
     return min(1, max(0, (decibels + 60) / 60))
   }
-}
-
-private final class ConverterInputState: @unchecked Sendable {
-  var supplied = false
 }

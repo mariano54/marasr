@@ -39,6 +39,8 @@ final class AppState: ObservableObject {
 
   private var targetApplication: InjectionTarget?
   private var recordingStartedAt: Date?
+  private var dictationGeneration: UInt64 = 0
+  private var turnPrepared = false
   // Logged when a dictation finishes, so an empty result shows whether the
   // microphone delivered silence or the recognizer returned nothing.
   private var capturedSampleCount = 0
@@ -314,30 +316,41 @@ final class AppState: ObservableObject {
       return
     }
 
+    dictationGeneration &+= 1
+    let generation = dictationGeneration
+    turnPrepared = false
+    targetApplication = injector.currentTarget()
+    recordingStartedAt = .now
+    capturedSampleCount = 0
+    capturePeakLevel = 0
+    transcribedSegmentCount = 0
+    pendingSamples.removeAll(keepingCapacity: true)
+    processingTask = nil
+    cachedRecentTranscripts = recentTranscripts()
+    overlay.showRecording()
+    dictationState = .recording
     listeningCue.play()
+    Log.dictation.notice(
+      "Dictation started (target: \(self.targetApplication?.applicationName ?? "none", privacy: .public))"
+    )
+
     do {
       await assembler.reset()
       await vad.startTurn()
-      targetApplication = injector.currentTarget()
-      recordingStartedAt = .now
-      capturedSampleCount = 0
-      capturePeakLevel = 0
-      transcribedSegmentCount = 0
-      pendingSamples.removeAll(keepingCapacity: true)
-      processingTask = nil
-      cachedRecentTranscripts = recentTranscripts()
-      overlay.showRecording()
-      dictationState = .recording
-      Log.dictation.notice(
-        "Dictation started (target: \(self.targetApplication?.applicationName ?? "none", privacy: .public))"
-      )
+      guard dictationState == .recording,
+        dictationGeneration == generation
+      else {
+        return
+      }
+      turnPrepared = true
 
-      try audioCapture.start(
+      try await audioCapture.start(
         discardingFirst: 0.2
       ) { [weak self] samples, level in
         Task { @MainActor in
           guard let self,
-            self.dictationState == .recording
+            self.dictationState == .recording,
+            self.dictationGeneration == generation
           else {
             return
           }
@@ -347,8 +360,19 @@ final class AppState: ObservableObject {
           self.enqueue(samples)
         }
       }
+      guard dictationState == .recording,
+        dictationGeneration == generation
+      else {
+        audioCapture.stop()
+        return
+      }
       duckMusic()
     } catch {
+      guard dictationState == .recording,
+        dictationGeneration == generation
+      else {
+        return
+      }
       Log.dictation.error(
         "Dictation could not start the microphone: \(String(describing: error), privacy: .public)"
       )
@@ -444,6 +468,18 @@ final class AppState: ObservableObject {
 
     await processingTask?.value
     processingTask = nil
+
+    guard turnPrepared,
+      capturedSampleCount > 0 || !pendingSamples.isEmpty
+    else {
+      let finishElapsed = ContinuousClock.now - finishStartedAt
+      Log.dictation.notice(
+        "Dictation finished: \(Date.now.timeIntervalSince(self.recordingStartedAt ?? .now), format: .fixed(precision: 1), privacy: .public) s, 0 chars (captured 0.0 s audio, finish \(String(describing: finishElapsed), privacy: .public))"
+      )
+      overlay.hide()
+      resetDictation()
+      return
+    }
 
     do {
       if !pendingSamples.isEmpty {
@@ -584,6 +620,7 @@ final class AppState: ObservableObject {
 
   private func resetDictation() {
     dictationState = .idle
+    turnPrepared = false
     targetApplication = nil
     recordingStartedAt = nil
     pendingSamples.removeAll(keepingCapacity: true)
